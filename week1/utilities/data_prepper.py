@@ -1,5 +1,6 @@
 # This file processes our queries, runs them through OpenSearch against the BBuy Products index to fetch their "rank" and so they can be used properly in a click model
 
+from collections import defaultdict
 import ltr_utils as lu
 import numpy as np
 import pandas as pd
@@ -232,22 +233,45 @@ class DataPrepper:
                                                 size=len(query_doc_ids), terms_field=terms_field)
         ##### Step Extract LTR Logged Features:
         # IMPLEMENT_START --
-        print("IMPLEMENT ME: __log_ltr_query_features: Extract log features out of the LTR:EXT response and place in a data frame")
         # Loop over the hits structure returned by running `log_query` and then extract out the features from the response per query_id and doc id.  Also capture and return all query/doc pairs that didn't return features
         # Your structure should look like the data frame below
-        feature_results = {}
-        feature_results["doc_id"] = []  # capture the doc id so we can join later
-        feature_results["query_id"] = []  # ^^^
-        feature_results["sku"] = []
-        feature_results["name_match"] = []
-        rng = np.random.default_rng(12345)
+        response = self.opensearch.search(body=log_query, index=self.index_name)
+        doc_id_to_hits = {int(hit["_id"]): hit for hit in response["hits"]["hits"] }
+
+        # store all features for a doc as a dict in a list
+        feature_names = set()
+        feature_results = []
         for doc_id in query_doc_ids:
-            feature_results["doc_id"].append(doc_id)  # capture the doc id so we can join later
-            feature_results["query_id"].append(query_id)
-            feature_results["sku"].append(doc_id)  
-            feature_results["name_match"].append(rng.random())
-        frame = pd.DataFrame(feature_results)
+            feature_result = {
+                "doc_id": doc_id,
+                "query_id": query_id,
+                "sku": doc_id
+            }
+            if hit := doc_id_to_hits.get(doc_id):
+                for feature in hit['fields']['_ltrlog'][0]['log_entry']:
+                    feature_result[feature["name"]] = feature.get("value", 0)
+
+            # store feature names for later usage
+            for feature_name in feature_result.keys():
+                feature_names.add(feature_name)
+
+            feature_results.append(feature_result)
+
+        # ensure we add feature values to all docs:
+        for feature_result in feature_results:
+            for feature_name in feature_names:
+                if feature_name not in feature_result:
+                    feature_result[feature_name] = 0
+
+        # store features for each doc as a list of feature values for all docs
+        feature_lists = defaultdict(list)
+        for feature_result in feature_results:
+            for name, value in feature_result.items():
+                feature_lists[name].append(value)
+
+        frame = pd.DataFrame(feature_lists)
         return frame.astype({'doc_id': 'int64', 'query_id': 'int64', 'sku': 'int64'})
+
         # IMPLEMENT_END
 
     # Can try out normalizing data, but for XGb, you really don't have to since it is just finding splits
