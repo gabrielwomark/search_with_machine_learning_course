@@ -6,16 +6,44 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 import argparse
 import json
 import os
+import re
 from getpass import getpass
 from urllib.parse import urljoin
 import pandas as pd
 import fileinput
 import logging
 
+import fasttext
+# Useful if you want to perform stemming.
+import nltk
+stemmer = nltk.stem.PorterStemmer()
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 logging.basicConfig(format='%(levelname)s:%(message)s')
+
+def preprocess_query_string(query):
+    """Preprocess query string for classification"""
+    lower = query.lower()
+    alphanum = re.sub(r"[^a-zA-Z0-9]", " ", lower)
+    single_spaced = re.sub(r"[ ]+", " ", alphanum)
+    
+    stemmed = " ".join([stemmer.stem(w) for w in query.split(" ")])
+    return stemmed
+
+def build_category_filter(predicted_categories, category_score_thresh = 0.5):
+    #valid_categories = [item for item in zip(*predicted_categories) if item[1] >= category_score_thresh]
+    current_score = 0
+    valid_categories = []
+    for category, score in zip(*predicted_categories):
+        valid_categories.append(category)
+        current_score += score
+        if current_score > category_score_thresh: 
+            break
+    if valid_categories:
+        categories = [category.lstrip("__label__") for category in valid_categories]
+        return {"terms": {"categoryLeaf": categories}}
+    
 
 # expects clicks and impressions to be in the row
 def create_prior_queries_from_group(
@@ -49,7 +77,7 @@ def create_prior_queries(doc_ids, doc_id_weights,
 
 
 # Hardcoded query here.  Better to use search templates or other query config.
-def create_query(user_query, click_prior_query, filters, sort="_score", sortDir="desc", size=10, source=None, use_synonyms=False):
+def create_query(user_query, click_prior_query, filters, sort="_score", sortDir="desc", size=10, source=None, use_synonyms=False, predicted_categories=None):
     name_field = "name.synonyms" if use_synonyms else "name"
     name_analyzer = "synonym" if use_synonyms else "standard"
     query_obj = {
@@ -170,6 +198,7 @@ def create_query(user_query, click_prior_query, filters, sort="_score", sortDir=
             }
         }
     }
+    print(query_obj)
     if click_prior_query is not None and click_prior_query != "":
         query_obj["query"]["function_score"]["query"]["bool"]["should"].append({
             "query_string": {
@@ -189,14 +218,26 @@ def create_query(user_query, click_prior_query, filters, sort="_score", sortDir=
     return query_obj
 
 
-def search(client, user_query, index="bbuy_products", sort="_score", sortDir="desc", use_synonyms=False):
-    #### W3: classify the query
-    #### W3: create filters and boosts
-    # Note: you may also want to modify the `create_query` method above
+def search(client, user_query, index="bbuy_products", sort="_score", sortDir="desc", use_synonyms=False, use_predicted_category=False):
+    filters = []
+    predicted_categories = None
+    if use_predicted_category:
+        #### W3: classify the query
+        model = fasttext.load_model("query_classifier.bin")
+        processed_user_query = preprocess_query_string(user_query)
+        predicted_categories = model.predict(processed_user_query, k=5)
+        print(predicted_categories)
+
+        #### W3: create filters and boosts
+        category_filter = build_category_filter(predicted_categories)
+        if category_filter:
+            filters.append(category_filter)
+        # Note: you may also want to modify the `create_query` method above
+
     name_field = "name"
     if use_synonyms:
         name_field = "name.synonyms"
-    query_obj = create_query(user_query, click_prior_query=None, filters=None, sort=sort, sortDir=sortDir, source=[name_field, "shortDescription"], use_synonyms=use_synonyms)
+    query_obj = create_query(user_query, click_prior_query=None, filters=filters, sort=sort, sortDir=sortDir, source=[name_field, "shortDescription"], use_synonyms=use_synonyms, predicted_categories=predicted_categories)
     logging.info(query_obj)
     response = client.search(query_obj, index=index)
     if response and response['hits']['hits'] and len(response['hits']['hits']) > 0:
@@ -210,6 +251,7 @@ if __name__ == "__main__":
     auth = ('admin', 'admin')  # For testing only. Don't store credentials in code.
     parser = argparse.ArgumentParser(description='Build LTR.')
     parser.add_argument("--synonyms", action="store_true")
+    parser.add_argument('--use_category', action="store_true")
     general = parser.add_argument_group("general")
     general.add_argument("-i", '--index', default="bbuy_products",
                          help='The name of the main index to search')
@@ -247,6 +289,7 @@ if __name__ == "__main__":
 
     )
     use_synonyms = args.synonyms
+    use_category = args.use_category
     index_name = args.index
     query_prompt = "\nEnter your query (type 'Exit' to exit or hit ctrl-c):"
     print(query_prompt)
@@ -255,7 +298,7 @@ if __name__ == "__main__":
         if query == "Exit":
             break
         #### W3: classify the query
-        search(client=opensearch, user_query=query, index=index_name, use_synonyms=use_synonyms)
+        search(client=opensearch, user_query=query, index=index_name, use_synonyms=use_synonyms, use_predicted_category=use_category)
 
         print(query_prompt)
 

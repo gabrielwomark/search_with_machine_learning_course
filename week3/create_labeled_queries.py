@@ -1,3 +1,4 @@
+import re
 import os
 import argparse
 import xml.etree.ElementTree as ET
@@ -49,8 +50,27 @@ df = pd.read_csv(queries_file_name)[['category', 'query']]
 df = df[df['category'].isin(categories)]
 
 # IMPLEMENT ME: Convert queries to lowercase, and optionally implement other normalization, like stemming.
+# Lowercase
+df['query'] = df['query'].str.lower()
+# Replace non-alphanumeric characters with a space.
+df['query'] = df['query'].str.replace(r"[^a-zA-Z0-9]", " ", regex=True)
+# Replace multiple spaces with single space
+df['query'] = df['query'].str.replace(r"[ ]+", " ", regex=True)
+# stem
+df['query'] = df['query'].apply(lambda query: " ".join([stemmer.stem(w) for w in query.split(" ")]))
 
 # IMPLEMENT ME: Roll up categories to ancestors to satisfy the minimum number of queries per category.
+query_counts = df.groupby("category").size().reset_index(name='count').sort_values("count").reset_index(drop=True)
+smallest_query_count = query_counts.loc[0, "count"]
+
+while smallest_query_count < min_queries:
+    counts_with_parents = query_counts.merge(parents_df, on=["category"], how="inner")
+    df = df.merge(counts_with_parents, on=["category"], how="inner")
+    df["category"][df["count"] < min_queries] = df[df["count"] < min_queries]["parent"]
+    df = df.drop(["count", "parent"], axis=1)
+    query_counts = df.groupby("category").size().reset_index(name='count').sort_values("count").reset_index(drop=True)
+    smallest_query_count = query_counts.loc[0, "count"]
+print(len(query_counts))
 
 # Create labels in fastText format.
 df['label'] = '__label__' + df['category']
